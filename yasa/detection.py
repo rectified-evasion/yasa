@@ -1407,6 +1407,7 @@ def sw_detect(
     amp_neg=(40, 200),
     amp_pos=(10, 150),
     amp_ptp=(75, 350),
+    rel_ptp_candidate_percentile=None,
     coupling=False,
     coupling_params={"freq_sp": (12, 16), "time": 1, "p": 0.05},
     remove_outliers=False,
@@ -1484,6 +1485,11 @@ def sw_detect(
         deviations if the data has been previously z-scored.
         Use ``np.inf`` to set no upper amplitude threshold
         (e.g. ``amp_ptp=(75, np.inf)``).
+    rel_ptp_candidate_percentile : int or None
+        Percentile of the peak-to-peak amplitude for sw candidates (three subsequent zero crossings
+        with ``dur_neg` and ``dur_pos`` meeting the duration criteria) determining a lower threshold 
+        for ptp amplitude (cf. e.g. Staresina et al. Nat. Neurosci. 2015 where they use 75).
+        Ignores ``amp_ptp``.
     coupling : boolean
         If True, YASA will also calculate the phase-amplitude coupling between
         the slow-waves phase and the spindles-related sigma band
@@ -1628,6 +1634,10 @@ def sw_detect(
         logger.warning("All channels have bad amplitude. Returning None.")
         return None
 
+    # If we try to determine amp_ptp from percentiles of the candidate, ignore amp_ptp variable
+    if rel_ptp_candidate_percentile:
+        amp_ptp = (0, np.inf)
+
     # Define time vector
     times = np.arange(data.size) / sf
     idx_mask = np.where(mask)[0]
@@ -1765,6 +1775,27 @@ def sw_detect(
         else:
             sw_sta = np.zeros(sw_dur.shape)
 
+        # compute relative ptp amplitude threshold, if requested
+        if rel_ptp_candidate_percentile:
+            # find candidates that meet the duration criteria regarding the durations of the SW
+            candidate_sw = np.logical_and.reduce(
+                (
+                    sw_dur == sw_dur_both_phase,
+                    sw_dur <= dur_neg[1] + dur_pos[1],
+                    sw_dur >= dur_neg[0] + dur_pos[0],
+                    neg_phase_dur > dur_neg[0],
+                    neg_phase_dur < dur_neg[1],
+                    pos_phase_dur > dur_pos[0],
+                    pos_phase_dur < dur_pos[1],
+                )
+            )
+            # compute ptp percentile over these
+            rel_ptp_lower_threshold = np.percentile(sw_ptp[candidate_sw], rel_ptp_candidate_percentile)
+            # print out threshold vlue found even in non-verbose mode
+            logger.warning("Using %i percentile based ptp lower threshold: %.2f uV (%i candidates)", rel_ptp_candidate_percentile, rel_ptp_lower_threshold, candidate_sw.sum())
+        else:
+            rel_ptp_lower_threshold = 0
+
         # And we apply a set of thresholds to remove bad slow waves
         good_sw = np.logical_and.reduce(
             (
@@ -1785,6 +1816,11 @@ def sw_detect(
                 sw_midcrossing > sw_start,
                 sw_midcrossing < sw_end,
                 sw_slope > 0,
+                # if using relative lower ptp threshold, apply it
+                np.logical_or(
+                    rel_ptp_candidate_percentile is None, 
+                    sw_ptp > rel_ptp_lower_threshold
+                ),
             )
         )
 
